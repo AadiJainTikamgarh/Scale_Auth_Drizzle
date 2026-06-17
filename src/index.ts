@@ -1,0 +1,25 @@
+import express from "express"
+import "dotenv/config"
+import cors from "cors";
+import { errorHandler } from "./utils/ErrorHandler.js";
+
+const PORT = process.env.PORT || 3000;
+
+const app = express();
+
+app.use(express.json())
+app.use(express.urlencoded({ extended: true }))
+app.use(cors({
+    origin: "*",
+    credentials: true
+}));
+
+import healthCheckRouter from "./routes/healthcheck.routes.js"
+
+app.use("/api/v1/health-check", healthCheckRouter);
+
+app.use(errorHandler)
+
+app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`)
+})
