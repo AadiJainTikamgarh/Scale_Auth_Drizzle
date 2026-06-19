@@ -10,6 +10,7 @@ import crypto from "crypto";
 import { hashPassword, verifyPassword } from "../utils/password.js";
 import jwt from "jsonwebtoken";
 import "dotenv/config";
+import {redisClient} from "../lib/redis.js";
 
 const generateToken = () => {
     const unhashedToken = crypto.randomBytes(32).toString("hex");
@@ -18,20 +19,16 @@ const generateToken = () => {
     return { token, expiryTime, unhashedToken }
 }
 
-const generateRefreshAccessToken = (userId: string) => {
-    const refreshToken = jwt.sign({ id: userId }, process.env.REFRESH_TOKEN_SECRET!, {
+const generateRefreshAccessToken = (userId: string, sessionId: string) => {
+    const refreshToken = jwt.sign({ sessionId }, process.env.REFRESH_TOKEN_SECRET!, {
         expiresIn: "7d"
     })
 
-    const accessToken = jwt.sign({ id: userId }, process.env.ACCESS_TOKEN_SECRET!, {
+    const accessToken = jwt.sign({ userId, sessionId }, process.env.ACCESS_TOKEN_SECRET!, {
         expiresIn: "15m"
     })
 
-    const oneDay = 24 * 60 * 60 * 1000;
-    const refreshTokenExpiryTime = 7 * oneDay;
-    const accessTokenExpiryTime = 15 * 60 * 1000;
-
-    return { refreshToken, accessToken, refreshTokenExpiryTime, accessTokenExpiryTime }
+    return { refreshToken, accessToken }
 }
 
 const register = asyncHandler(async (req, res) => {
@@ -143,30 +140,37 @@ const loginUser = asyncHandler(async (req, res) => {
     const user = matchedUsers[0];
 
     if (!user) {
-        throw new ApiError(404, "User not found");
+        throw new ApiError(401, "Invalid credentials");
     }
 
     const isPasswordMatch = await verifyPassword(user.password, password);
 
     if (!isPasswordMatch) {
-        throw new ApiError(401, "Invalid password");
+        throw new ApiError(401, "Invalid credentials");
     }
 
-    const { accessToken, refreshToken, refreshTokenExpiryTime, accessTokenExpiryTime } = generateRefreshAccessToken(user.id);
+    const sessionId = crypto.randomUUID();
 
+    const { accessToken, refreshToken } = generateRefreshAccessToken(user.id, sessionId);
+    
+    const oneDay = 24 * 60 * 60 * 1000;
+    const refreshTokenExpiryTime = 7 * oneDay;
+    const accessTokenExpiryTime = 15 * 60 * 1000;
     const expiresAt = new Date(Date.now() + refreshTokenExpiryTime);
+    
+    const hashToken = crypto.createHash("sha256").update(refreshToken).digest("hex");
 
     const insertedSession = await db.insert(sessionStore).values({
+        id: sessionId,
         userId: user.id,
-
-        refreshToken,
-        device: req.get("User-Agent") || "unknown",
-        ipAddress: req.ip || "[IP_ADDRESS]",
+        refreshToken: hashToken,
+        device: req.get("user-agent") || "Unknown",
+        ipAddress: req.ip || "Unknown",
         expiresAt
     }).returning().execute();
 
     const session = insertedSession[0];
-
+    
     if (!session) {
         throw new ApiError(500, "Failed to create session");
     }
@@ -183,33 +187,55 @@ const loginUser = asyncHandler(async (req, res) => {
         maxAge: accessTokenExpiryTime
     })
 
-    res.cookie("sessionId", session.id, {
-        ...options,
-        maxAge: refreshTokenExpiryTime
-    })
 
-    return res.status(200).json(new ApiResponse(200, { email: user.email, user_id: user.id, session_id: session.id }, "Logged in successfully"))
+    return res.status(200).json(new ApiResponse(200, {email: user.email, user_id: user.id, accessToken},"Logged in successfully"))
 })
 
 const logoutUser = asyncHandler(async (req, res) => {
-    const {sessionId} = req.cookies;
+    const { accessToken, refreshToken } = req.cookies;
 
-    if (!sessionId) {
-        return res.status(200).json(new ApiResponse(200, "No refresh token found"))
+    const options = {httpOnly: true, secure: true, sameSite: "strict"} as const;
+    res.clearCookie("refreshToken", options);
+    res.clearCookie("accessToken", options);
+
+    let sessionId : string | null = null;
+
+    if(accessToken){
+        try{
+            const decodedToken = jwt.decode(accessToken) as {userId: string, sessionId: string, exp: number};
+            
+            if(decodedToken){
+                sessionId = decodedToken.sessionId;
+
+                if(decodedToken.exp){
+                    const currentTime = Math.floor(Date.now() / 1000);
+                    const timeLeft = decodedToken.exp - currentTime;
+                    
+                    if(timeLeft > 0){
+                        await redisClient.set(`blacklist:${accessToken}`, "true", "EX", timeLeft);
+                    }
+                }
+            }
+        } catch (error){
+        }
     }
 
-    const matchedSession = await db.select().from(sessionStore).where(eq(sessionStore.id, sessionId)).execute();
-    const session = matchedSession[0];
+    if(!sessionId && refreshToken){
+        try{
+            const decodedRefreshToken = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET!) as {userId: string, sessionId: string};
 
-    if (!session) {
-        throw new ApiError(404, "Session not found");
+            if(decodedRefreshToken){
+                sessionId = decodedRefreshToken.sessionId;
+            }
+        } catch (error){
+        }
     }
 
-    await db.delete(sessionStore).where(eq(sessionStore.id, sessionId)).execute();
-
-    res.clearCookie("refreshToken");
-    res.clearCookie("accessToken");
-    res.clearCookie("sessionId");
+    if(sessionId){
+        await db.delete(sessionStore).where(eq(sessionStore.id, sessionId)).execute();
+    } else{
+        return res.status(200).json(new ApiResponse(200, "Already logged out"))
+    }
 
     return res.status(200).json(new ApiResponse(200, "Logged out successfully"))
 })
@@ -251,29 +277,57 @@ const updatePassword = asyncHandler(async (req, res) => {
 })
 
 const refreshAccessToken = asyncHandler(async (req, res) => {
-    const { refreshToken, sessionId } = (req as any).session as { refreshToken: string, sessionId: string };
+    const refreshToken = req.cookies?.refreshToken;
 
-    const matchSession = await db.select().from(sessionStore).where(eq(sessionStore.id, sessionId)).execute();
+    if (!refreshToken) {
+        throw new ApiError(401, "Refresh token or session ID missing");
+    }
+
+    let decoded: any;
+    try {
+        decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET!);
+    } catch (error: any) {
+        throw new ApiError(401, "Invalid refresh token");
+    }
+
+    const matchSession = await db.select().from(sessionStore).where(eq(sessionStore.id, decoded.sessionId)).execute();
     const session = matchSession[0];
 
     if (!session) {
         throw new ApiError(404, "Session not found");
     }
 
-    if (session.refreshToken != refreshToken) {
-        throw new ApiError(400, "Invalid refresh token");
+    const options = {httpOnly: true, secure: true, sameSite: "strict"} as const;
+
+    const hashedToken = crypto.createHash("sha256").update(refreshToken).digest("hex");
+
+    if(hashedToken !== session.refreshToken){
+        await db.delete(sessionStore).where(eq(sessionStore.id, session.id)).execute();
+        res.clearCookie("refreshToken", options);
+        res.clearCookie("accessToken", options);
+        throw new ApiError(403, "Forbidden: Attempt to use invalid refresh token");
     }
 
-    const { refreshToken: newRefreshToken, accessToken: newAccessToken, refreshTokenExpiryTime, accessTokenExpiryTime } = generateRefreshAccessToken(session.userId);
+    if (new Date() > session.expiresAt) {
+        await db.delete(sessionStore).where(eq(sessionStore.id, session.id)).execute();
+        res.clearCookie("refreshToken", options);
+        res.clearCookie("accessToken", options);
+        throw new ApiError(401, "Session expired");
+    }
 
-    const expiresAt = new Date(Date.now() + refreshTokenExpiryTime);
+    const oneDay = 24 * 60 * 60 * 1000;
+    const refreshTokenExpiryTime = 7 * oneDay;
+    const accessTokenExpiryTime = 15 * 60 * 1000;
+
+    const { refreshToken: newRefreshToken, accessToken: newAccessToken } = generateRefreshAccessToken(session.userId, session.id);
+
+    const newExpiresAt = new Date(Date.now() + refreshTokenExpiryTime);
+    const newHashedToken = crypto.createHash("sha256").update(newRefreshToken).digest("hex");
 
     await db.update(sessionStore).set({
-        refreshToken: newRefreshToken,
-        expiresAt
+        refreshToken: newHashedToken,
+        expiresAt: newExpiresAt
     }).where(eq(sessionStore.id, session.id)).execute();
-
-    const options = { httpOnly: true, secure: true, sameSite: "strict" } as const;
 
     res.cookie("refreshToken", newRefreshToken, {
         ...options,
@@ -283,11 +337,6 @@ const refreshAccessToken = asyncHandler(async (req, res) => {
     res.cookie("accessToken", newAccessToken, {
         ...options,
         maxAge: accessTokenExpiryTime
-    })
-
-    res.cookie("sessionId", session.id, {
-        ...options,
-        maxAge: refreshTokenExpiryTime
     })
 
     return res.status(200).json(

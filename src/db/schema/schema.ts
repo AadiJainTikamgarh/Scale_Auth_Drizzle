@@ -29,9 +29,9 @@ export const sessionStore = pgTable("session_stores", {
     userId: uuid("user_id").references(() => users.id, {
         onDelete: "cascade"
     }).notNull(),
-    refreshToken: text("refreshToken").notNull(),
+    refreshToken: uuid("refresh_token").notNull(),
     device: text("device").notNull(),
     ipAddress: text("ip_address").notNull(),
     expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
     createdAt: timestamp("created_at", { mode: "date" }).defaultNow()
-}, (table) => [index("refresh_token_idx").on(table.refreshToken), index("userId_idx").on(table.userId)])
+}, (table) => [index("userId_idx").on(table.userId)])
