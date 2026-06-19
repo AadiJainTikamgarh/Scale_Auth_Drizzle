@@ -8,14 +8,20 @@ interface SendEmailOptions {
 }
 
 export const sendEmail = async (options: SendEmailOptions): Promise<any> => {
-    const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: parseInt(process.env.SMTP_PORT || "2525"),
-        auth: {
-            user: process.env.SMTP_USER,
-            pass: process.env.SMTP_PASS,
-        },
-    });
+    const isPlaceholder = !process.env.SMTP_USER || process.env.SMTP_USER === "placeholder_user" || process.env.SMTP_USER.includes("placeholder");
+
+    const transporter = nodemailer.createTransport(
+        (isPlaceholder
+            ? { jsonTransport: true }
+            : {
+                host: process.env.SMTP_HOST,
+                port: parseInt(process.env.SMTP_PORT || "2525"),
+                auth: {
+                    user: process.env.SMTP_USER,
+                    pass: process.env.SMTP_PASS,
+                },
+            }) as any
+    );
 
     const mailOptions = {
         from: process.env.SMTP_FROM || '"Scale Auth" <no-reply@scaleauth.com>',
@@ -25,5 +31,13 @@ export const sendEmail = async (options: SendEmailOptions): Promise<any> => {
         html: options.html,
     };
 
-    return await transporter.sendMail(mailOptions);
+    const info = await transporter.sendMail(mailOptions);
+    if (isPlaceholder) {
+        console.log("------------------- MOCK EMAIL SENT -------------------");
+        console.log("To:", options.to);
+        console.log("Subject:", options.subject);
+        console.log("HTML length:", options.html.length);
+        console.log("-------------------------------------------------------");
+    }
+    return info;
 };

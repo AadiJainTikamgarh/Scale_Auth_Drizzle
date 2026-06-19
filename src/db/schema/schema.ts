@@ -29,7 +29,7 @@ export const sessionStore = pgTable("session_stores", {
     userId: uuid("user_id").references(() => users.id, {
         onDelete: "cascade"
     }).notNull(),
-    refreshToken: uuid("refresh_token").notNull(),
+    refreshToken: text("refresh_token").notNull(),
     device: text("device").notNull(),
     ipAddress: text("ip_address").notNull(),
     expiresAt: timestamp("expires_at", { mode: "date" }).notNull(),
