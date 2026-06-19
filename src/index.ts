@@ -1,6 +1,7 @@
 import express from "express"
 import "dotenv/config"
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import { errorHandler } from "./utils/ErrorHandler.js";
 
 const PORT = process.env.PORT || 3000;
@@ -13,10 +14,14 @@ app.use(cors({
     origin: "*",
     credentials: true
 }));
+app.use(cookieParser());
 
 import healthCheckRouter from "./routes/healthcheck.routes.js"
+import userRouter from "./routes/users.routes.js"
 
 app.use("/api/v1/health-check", healthCheckRouter);
+app.use("/api/v1/users", userRouter);
+
 
 app.use(errorHandler)
 
