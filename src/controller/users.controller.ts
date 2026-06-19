@@ -175,7 +175,7 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(500, "Failed to create session");
     }
 
-    const options = { httpOnly: true, secure: true, sameSite: "strict" } as const;
+    const options = { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" } as const;
 
     res.cookie("refreshToken", refreshToken, {
         ...options,
@@ -194,7 +194,7 @@ const loginUser = asyncHandler(async (req, res) => {
 const logoutUser = asyncHandler(async (req, res) => {
     const { accessToken, refreshToken } = req.cookies;
 
-    const options = {httpOnly: true, secure: true, sameSite: "strict"} as const;
+    const options = {httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict"} as const;
     res.clearCookie("refreshToken", options);
     res.clearCookie("accessToken", options);
 
@@ -242,7 +242,10 @@ const logoutUser = asyncHandler(async (req, res) => {
 
 const updatePassword = asyncHandler(async (req, res) => {
     const { currentPassword, newPassword } = req.body;
-    const { userId } = (req as any).user as { userId: string };
+    const userId = req.user?.userId;
+    if (!userId) {
+        throw new ApiError(401, "Unauthorized");
+    }
 
     if (!currentPassword || !newPassword) {
         throw new ApiError(400, "Current and new password are required");
@@ -297,7 +300,7 @@ const refreshAccessToken = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Session not found");
     }
 
-    const options = {httpOnly: true, secure: true, sameSite: "strict"} as const;
+    const options = {httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict"} as const;
 
     const hashedToken = crypto.createHash("sha256").update(refreshToken).digest("hex");
 
@@ -345,10 +348,9 @@ const refreshAccessToken = asyncHandler(async (req, res) => {
 })
 
 const resendVerificationEmail = asyncHandler(async (req, res) => {
-    const {userId} = (req as any).user as {userId: string};
-
+    const userId = req.user?.userId;
     if (!userId) {
-        throw new ApiError(400, "User not found")
+        throw new ApiError(401, "Unauthorized");
     }
 
     const matchedUsers = await db.select().from(users).where(eq(users.id, userId)).execute();

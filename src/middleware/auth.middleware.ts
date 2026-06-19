@@ -21,7 +21,7 @@ export const verifyJWT = async (req: Request, res: Response, next: NextFunction)
 
         const { userId, sessionId } = jwt.verify(accessToken, process.env.ACCESS_TOKEN_SECRET!) as { userId: string, sessionId: string };
 
-        (req as any).user = { userId, sessionId };
+        req.user = { userId, sessionId };
 
         return next();
     } catch (error: any) {

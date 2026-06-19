@@ -6,7 +6,10 @@ import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 
 const getAllSessions = asyncHandler(async (req, res) => {
-    const userId = (req as any).user.userId;
+    const userId = req.user?.userId;
+    if (!userId) {
+        throw new ApiError(401, "Unauthorized");
+    }
 
     const sessions = await db.select().from(sessionStore).where(eq(sessionStore.userId, userId)).execute();
 
@@ -14,9 +17,12 @@ const getAllSessions = asyncHandler(async (req, res) => {
 })
 
 const deleteAllSession = asyncHandler(async (req, res) => {
-    const userId = (req as any).user.userId;
+    const userId = req.user?.userId;
+    if (!userId) {
+        throw new ApiError(401, "Unauthorized");
+    }
 
-    const options = {httpOnly: true, secure: true, sameSite: "strict"} as const;
+    const options = {httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict"} as const;
 
     res.clearCookie("refreshToken", options);
     res.clearCookie("accessToken", options);
@@ -37,7 +43,10 @@ const deleteSession = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Session id required");
     }
 
-    const userId = (req as any).user.userId;
+    const userId = req.user?.userId;
+    if (!userId) {
+        throw new ApiError(401, "Unauthorized");
+    }
 
     const matchedSessions = await db.select().from(sessionStore).where(
         and(
