@@ -23,3 +23,16 @@ export const changePasswordValidator = z.object({
         newPassword: z.string().min(6, "New password must be at least 6 characters long"),
     }),
 });
+
+export const forgetPasswordRequestValidator = z.object({
+    body: z.object({
+        email: z.string().trim().email("Invalid email address"),
+    }),
+});
+
+export const resetPasswordValidator = z.object({
+    body: z.object({
+        token: z.string().min(1, "Token is required"),
+        newPassword: z.string().min(6, "New password must be at least 6 characters long"),
+    }),
+});

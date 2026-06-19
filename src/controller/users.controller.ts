@@ -11,6 +11,13 @@ import { hashPassword, verifyPassword } from "../utils/password.js";
 import jwt from "jsonwebtoken";
 import "dotenv/config";
 
+const generateToken = () => {
+    const unhashedToken = crypto.randomBytes(32).toString("hex");
+    const token = crypto.createHash("sha256").update(unhashedToken).digest("hex");
+    const expiryTime = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    return { token, expiryTime, unhashedToken }
+}
+
 const generateRefreshAccessToken = (userId: string) => {
     const refreshToken = jwt.sign({ id: userId }, process.env.REFRESH_TOKEN_SECRET!, {
         expiresIn: "7d"
@@ -45,9 +52,7 @@ const register = asyncHandler(async (req, res) => {
         throw new ApiError(400, "User already exists");
     }
 
-    const verifyToken = crypto.randomBytes(32).toString("hex");
-    const verifyTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
+    const { token, expiryTime: verifyTokenExpiry, unhashedToken: verifyUnhashedToken } = generateToken();
     const hashedPassword = await hashPassword(password);
 
     const createUser = await db.insert(users).values({
@@ -56,7 +61,7 @@ const register = asyncHandler(async (req, res) => {
         username,
         email,
         password: hashedPassword,
-        verifyToken,
+        verifyToken: token,
         verifyTokenExpiry
     });
 
@@ -64,7 +69,7 @@ const register = asyncHandler(async (req, res) => {
         throw new ApiError(500, "Failed to create user")
     }
 
-    const verificationLink = `${process.env.CLIENT_URL || "http://localhost:3001"}/api/v1/users/verify-email?token=${verifyToken}`;
+    const verificationLink = `${process.env.CLIENT_URL || "http://localhost:3001"}/verify-email?token=${verifyUnhashedToken}`;
 
     const emailHtml = generateEmailHtml({
         title: "Verify your email address",
@@ -102,11 +107,16 @@ const verifyEmail = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Token not found");
     }
 
-    const matchedUsers = await db.select().from(users).where(eq(users.verifyToken, token)).execute();
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+    const matchedUsers = await db.select().from(users).where(eq(users.verifyToken, hashedToken)).execute();
     const user = matchedUsers[0];
 
     if (!user) {
         throw new ApiError(404, "Invalid verification token");
+    }
+
+    if(user.isVerified){
+        throw new ApiError(400, "User is already verified");
     }
 
     if (user.verifyTokenExpiry && user.verifyTokenExpiry < new Date()) {
@@ -285,5 +295,144 @@ const refreshAccessToken = asyncHandler(async (req, res) => {
     );
 })
 
+const resendVerificationEmail = asyncHandler(async (req, res) => {
+    const {userId} = (req as any).user as {userId: string};
 
-export { register, verifyEmail, loginUser, logoutUser, updatePassword, refreshAccessToken }
+    if (!userId) {
+        throw new ApiError(400, "User not found")
+    }
+
+    const matchedUsers = await db.select().from(users).where(eq(users.id, userId)).execute();
+    const user = matchedUsers[0];
+
+    if (!user) {
+        throw new ApiError(404, "User not found")
+    }
+
+    if (user.isVerified) {
+        throw new ApiError(400, "User is already verified")
+    }
+
+    const { token: newToken, expiryTime } = generateToken()
+
+    await db.update(users).set({
+        verifyToken: newToken,
+        verifyTokenExpiry: expiryTime
+    }).where(eq(users.id, user.id)).execute();
+
+    const verificationLink = `${process.env.CLIENT_URL || "http://localhost:3001"}/api/v1/users/verify-email?token=${newToken}`;
+
+    const emailHtml = generateEmailHtml({
+        title: "Verify your email address",
+        greeting: `Hello ${user.first_name},`,
+        introLines: [
+            "We received a request to resend your verification email. Please verify your email address to activate your account."
+        ],
+        actionButton: {
+            text: "Verify Email Address",
+            link: verificationLink
+        },
+        outroLines: [
+            "This link will expire in 24 hours.",
+            "If you did not request this, you can safely ignore this email."
+        ]
+    });
+
+    try {
+        await sendEmail({
+            to: user.email,
+            subject: "Resend Verification Email",
+            html: emailHtml
+        });
+    } catch (error: any) {
+        throw new ApiError(500, error.message || "Failed to send verification email")
+    }
+
+    return res.status(200).json(new ApiResponse(200, "Verification mail sent successfully"))
+})
+
+const forgetPasswordRequest = asyncHandler(async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        throw new ApiError(400, "Email is required");
+    }
+
+    const matchedUser = await db.select().from(users).where(eq(users.email, email)).execute();
+    const user = matchedUser[0];
+
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    const { token: newToken, unhashedToken } = generateToken();
+    const expireTime = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    await db.update(users).set({
+        forgetPasswordToken: newToken,
+        forgetPasswordTokenExpiry: expireTime
+    }).where(eq(users.id, user.id)).execute();
+
+    const resetLink = `${process.env.CLIENT_URL || "http://localhost:3001"}/reset-password?token=${unhashedToken}`;
+
+    const emailHtml = generateEmailHtml({
+        title: "Reset your password",
+        greeting: `Hello ${user.first_name},`,
+        introLines: [
+            "We received a request to reset your password. Please click the link below to set a new password."
+        ],
+        actionButton: {
+            text: "Reset Password",
+            link: resetLink
+        },
+        outroLines: [
+            "This link will expire in 10 minutes.",
+            "If you did not request a password reset, you can safely ignore this email."
+        ]
+    });
+
+    try {
+        await sendEmail({
+            to: user.email,
+            subject: "Reset your password",
+            html: emailHtml
+        });
+    } catch (error: any) {
+        throw new ApiError(500, error.message || "Failed to send password reset email");
+    }
+
+    return res.status(200).json(new ApiResponse(200, "Password reset link sent to your email successfully"));
+})
+
+const resetPassword = asyncHandler(async (req, res) => {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+        throw new ApiError(400, "Token and new password are required");
+    }
+
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    const matchedUser = await db.select().from(users).where(eq(users.forgetPasswordToken, hashedToken)).execute();
+    const user = matchedUser[0];
+
+    if (!user) {
+        throw new ApiError(404, "Invalid or expired password reset token");
+    }
+
+    if (user.forgetPasswordTokenExpiry && user.forgetPasswordTokenExpiry < new Date()) {
+        throw new ApiError(400, "Password reset token has expired");
+    }
+
+    const hashedPassword = await hashPassword(newPassword);
+
+    await db.update(users).set({
+        password: hashedPassword,
+        forgetPasswordToken: null,
+        forgetPasswordTokenExpiry: null
+    }).where(eq(users.id, user.id)).execute();
+
+    return res.status(200).json(new ApiResponse(200, "Password reset successfully"));
+})
+
+export { register, verifyEmail, loginUser, logoutUser, updatePassword, refreshAccessToken, resendVerificationEmail, forgetPasswordRequest, resetPassword }
