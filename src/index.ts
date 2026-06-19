@@ -16,6 +16,10 @@ app.use(cors({
 }));
 app.use(cookieParser());
 
+import { startCronJobs } from "./cron/index.js";
+
+startCronJobs();
+
 import healthCheckRouter from "./routes/healthcheck.routes.js"
 import userRouter from "./routes/users.routes.js"
 import sessionRouter from "./routes/session.routes.js"
